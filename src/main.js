@@ -1,5 +1,11 @@
 import "./style.css";
-import { getTranslationServiceStatus, translateSegment } from "./translator";
+import {
+  clearOpenAiApiKey,
+  getStoredOpenAiApiKey,
+  getTranslationServiceStatus,
+  saveOpenAiApiKey,
+  translateSegment
+} from "./translator";
 
 const languageModes = [
   { id: "en", label: "英文模式", recognitionLang: "en-US", targetLang: "zh-TW", targetLabel: "中文", apiMode: "english" },
@@ -15,13 +21,11 @@ const SEGMENT_PUNCTUATION = /[.!?。？！]/;
 
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 
-const serviceStatus = getTranslationServiceStatus();
-
 const state = {
   selectedModeId: languageModes[0].id,
   listening: false,
   meetingMode: false,
-  translationService: serviceStatus.label,
+  translationService: "",
   segments: [],
   currentBuffer: ""
 };
@@ -50,6 +54,8 @@ app.innerHTML = `
   <section class="panel">
     <ul class="status-list">
       <li>語音辨識：<span id="speech-status">待機</span></li>
+      <li>GPT 修正：<span id="gpt-status"></span></li>
+      <li>Google 翻譯：<span>由本站提供</span></li>
       <li>翻譯服務：<span id="translation-service"></span></li>
       <li>翻譯目標語言：<span id="target-language"></span></li>
     </ul>
@@ -66,6 +72,20 @@ app.innerHTML = `
       <div id="translated-segments" class="segment-list"><p class="hint">尚無內容</p></div>
     </article>
   </section>
+
+  <div id="settings-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="modal-panel">
+      <h3 id="settings-title">設定</h3>
+      <p class="hint">OpenAI API Key 僅儲存在你的瀏覽器，不會儲存在本站伺服器。</p>
+      <label class="settings-label" for="openai-api-key-input">OpenAI API Key</label>
+      <input id="openai-api-key-input" class="settings-input" type="password" autocomplete="off" />
+      <div class="modal-actions">
+        <button id="save-openai-key-btn" class="feature-btn">儲存</button>
+        <button id="clear-openai-key-btn" class="feature-btn">清除 API Key</button>
+        <button id="close-settings-btn" class="feature-btn">關閉</button>
+      </div>
+    </div>
+  </div>
 `;
 
 const mainActionBtn = document.querySelector("#main-action");
@@ -74,17 +94,23 @@ const meetingModeBtn = document.querySelector("#meeting-mode-btn");
 const settingsBtn = document.querySelector("#settings-btn");
 const clearBtn = document.querySelector("#clear-btn");
 const speechStatusEl = document.querySelector("#speech-status");
+const gptStatusEl = document.querySelector("#gpt-status");
 const translationServiceEl = document.querySelector("#translation-service");
 const targetLanguageEl = document.querySelector("#target-language");
 const sourceSegmentsEl = document.querySelector("#source-segments");
 const translatedSegmentsEl = document.querySelector("#translated-segments");
 const serviceMessageEl = document.querySelector("#service-message");
+const settingsModalEl = document.querySelector("#settings-modal");
+const openAiApiKeyInputEl = document.querySelector("#openai-api-key-input");
+const saveOpenAiKeyBtn = document.querySelector("#save-openai-key-btn");
+const clearOpenAiKeyBtn = document.querySelector("#clear-openai-key-btn");
+const closeSettingsBtn = document.querySelector("#close-settings-btn");
 
 function getSelectedMode() {
   return languageModes.find((mode) => mode.id === state.selectedModeId) ?? languageModes[0];
 }
 
-function renderModeButtons() { /* unchanged pattern */
+function renderModeButtons() {
   modeButtonsContainer.innerHTML = languageModes
     .map((mode) => `<button class="mode-btn ${mode.id === state.selectedModeId ? "active" : ""}" data-mode-id="${mode.id}">${mode.label}</button>`)
     .join("");
@@ -105,7 +131,7 @@ function renderSegments() {
     .map((segment) => `
       <div class="segment-item">
         <p>${segment.translatedText}</p>
-        <small>GPT 修正：${segment.cleanedByGpt ? "成功" : "未使用"}</small><br>
+        <small>GPT 修正：${segment.cleanedByGpt ? "成功" : segment.gptError ? "失敗已略過" : "未啟用"}</small><br>
         <small>Google 翻譯：${segment.ok ? "成功" : "失敗"}</small>
       </div>
     `)
@@ -115,9 +141,14 @@ function renderSegments() {
 function render() {
   renderModeButtons();
   const selectedMode = getSelectedMode();
+  const serviceStatus = getTranslationServiceStatus();
+
+  state.translationService = serviceStatus.configured ? serviceStatus.label : "尚未設定";
+
   mainActionBtn.textContent = state.listening ? "🛑 停止翻譯" : "🎤 點我開始翻譯";
   mainActionBtn.classList.toggle("listening", state.listening);
   speechStatusEl.textContent = state.listening ? "聆聽中" : "待機";
+  gptStatusEl.textContent = serviceStatus.hasOpenAiKey ? "已啟用" : "未啟用";
   meetingModeBtn.textContent = `🧠 會議模式：${state.meetingMode ? "開" : "關"}`;
   translationServiceEl.textContent = state.translationService;
   targetLanguageEl.textContent = selectedMode.targetLabel;
@@ -142,6 +173,7 @@ async function flushSegment(force = false) {
     sourceText: text,
     translatedText: result.translatedText || "翻譯服務尚未設定或 API 發生錯誤",
     cleanedByGpt: result.cleanedByGpt,
+    gptError: result.gptError || "",
     ok: result.ok
   });
 
@@ -155,9 +187,7 @@ async function flushSegment(force = false) {
 function resetPauseTimer() {
   clearTimeout(pauseTimer);
   pauseTimer = setTimeout(() => {
-    if (Date.now() - lastFinalAt >= PAUSE_MS) {
-      flushSegment(true);
-    }
+    if (Date.now() - lastFinalAt >= PAUSE_MS) flushSegment(true);
   }, PAUSE_MS + 20);
 }
 
@@ -189,10 +219,8 @@ function startListening() {
     for (let i = event.resultIndex; i < event.results.length; i += 1) {
       const result = event.results[i];
       if (!result.isFinal) continue;
-
       const finalText = result[0].transcript.trim();
       if (!finalText) continue;
-
       state.currentBuffer = `${state.currentBuffer} ${finalText}`.trim();
       lastFinalAt = Date.now();
       resetPauseTimer();
@@ -219,6 +247,15 @@ function startListening() {
   recognition.start();
 }
 
+function openSettingsModal() {
+  openAiApiKeyInputEl.value = getStoredOpenAiApiKey();
+  settingsModalEl.classList.remove("hidden");
+}
+
+function closeSettingsModal() {
+  settingsModalEl.classList.add("hidden");
+}
+
 mainActionBtn.addEventListener("click", () => (state.listening ? stopListening() : startListening()));
 modeButtonsContainer.addEventListener("click", (event) => {
   const target = event.target;
@@ -237,8 +274,20 @@ meetingModeBtn.addEventListener("click", () => {
   }
   render();
 });
-settingsBtn.addEventListener("click", () => {
-  alert("翻譯服務架構：Web Speech API 分段 -> GPT 修正 -> Google Translate（透過 Cloudflare Worker）");
+settingsBtn.addEventListener("click", openSettingsModal);
+closeSettingsBtn.addEventListener("click", closeSettingsModal);
+settingsModalEl.addEventListener("click", (event) => {
+  if (event.target === settingsModalEl) closeSettingsModal();
+});
+saveOpenAiKeyBtn.addEventListener("click", () => {
+  saveOpenAiApiKey(openAiApiKeyInputEl.value || "");
+  closeSettingsModal();
+  render();
+});
+clearOpenAiKeyBtn.addEventListener("click", () => {
+  clearOpenAiApiKey();
+  openAiApiKeyInputEl.value = "";
+  render();
 });
 clearBtn.addEventListener("click", () => {
   state.segments = [];
