@@ -1,81 +1,53 @@
 # 多語語音翻譯工具（Vite + Vanilla JS + Cloudflare Worker）
 
-此專案使用前後端分離翻譯架構：
+## 模式說明
 
-1. 前端以 Web Speech API 進行語音辨識。
-2. 前端將辨識結果做句子切段。
-3. 每段送至 Cloudflare Worker `/api/translate`。
-4. 若使用者有在前端設定 OpenAI API Key，Worker 會先用 GPT 做語音辨識文字整理（不翻譯）。
-5. 再用 Google Translate API 翻譯成 `zh-TW`。
+- **一般模式**：適合一句一句翻譯。按下開始後，抓到一段 final transcript 會自動翻譯並停止聆聽。
+- **會議模式**：適合工程會議。按下開始後會持續聆聽，依標點/長度/停頓/final transcript 自動切段，直到你再次按主按鈕停止。
 
-## 專案結構
+## 工程術語保護（Glossary Protection）
 
-- `src/main.js`：UI、語音辨識、切段與段落翻譯流程
-- `src/translator.js`：呼叫後端 API 的翻譯函式與 OpenAI Key localStorage 管理
-- `src/style.css`：樣式
-- `worker/index.js`：Cloudflare Worker proxy
-- `worker/wrangler.toml.example`：Worker 設定範例
-- `.env.example`：前端環境變數範例
+系統內建工程術語保護（如 CRAC、PDU、VESDA、CDU Loop、Liquid Cooling 等）：
 
-## 前端環境變數
+1. 翻譯前先替換為 `__TERM_001__` 這類 placeholder。
+2. GPT cleanup 階段禁止修改 placeholder。
+3. Google Translate 完成後再還原術語。
 
-複製檔案：
+用途：避免關鍵工程詞彙被 GPT 或翻譯引擎錯翻。
 
-```bash
-cp .env.example .env
-```
+## OpenAI API Key（前端設定）
 
-設定：
+1. 點擊「⚙️ 設定」。
+2. 輸入 OpenAI API Key 後按「儲存」。
+3. Key 僅存於瀏覽器 localStorage，不會存到本站伺服器。
+
+> 不填 OpenAI API Key 也可使用：系統會直接走 Google 翻譯（略過 GPT 修正）。
+
+## Cloudflare Worker 與 Google Translate API Key
+
+1. 進入 `worker/` 部署 Worker。
+2. 設定 `GOOGLE_TRANSLATE_API_KEY`（請放在 Worker secrets/vars，不可放前端）。
+3. 前端 `.env` 設定：
 
 ```env
 VITE_TRANSLATE_API_BASE=https://your-worker-domain.workers.dev
 ```
 
-若未設定 `VITE_TRANSLATE_API_BASE`，前端會顯示：
-- 「翻譯服務：尚未設定」
-- 「尚未設定翻譯 API，請先部署 Cloudflare Worker」
+如果未設定 Worker API base，前端會顯示：
+「尚未設定翻譯 API，請先部署 Cloudflare Worker」。
 
-## OpenAI API Key（使用者自行輸入）
+## 專案結構
 
-1. 在網頁點擊「⚙️ 設定」。
-2. 輸入自己的 OpenAI API Key 後按「儲存」。
-3. API Key 僅儲存在使用者瀏覽器 `localStorage`。
-4. API Key 不會儲存在 GitHub、Cloudflare Worker、或本站伺服器。
+- `src/main.js`：語音辨識、一般/會議模式、切段、UI
+- `src/glossary.js`：工程術語保護/還原
+- `src/translator.js`：呼叫 Worker API 與 OpenAI Key localStorage
+- `src/style.css`：桌機/手機樣式
+- `worker/index.js`：Cloudflare Worker（GPT cleanup + Google Translate）
 
-若沒有設定 OpenAI API Key：
-- 仍可正常翻譯（Google Translate）
-- 只是不會先進行 GPT 修正
-
-## Cloudflare Worker 設定
-
-1. 進入 `worker/` 目錄部署 Worker。
-2. 使用 `wrangler.toml.example` 建立實際設定。
-3. 將 Google Translate API Key 放在 Worker 的 secrets 或 vars（不可放前端）。
-
-必要變數：
-- `GOOGLE_TRANSLATE_API_KEY`
-
-> 安全要求：
-> - GitHub Pages 前端只能呼叫 Worker。
-> - `GOOGLE_TRANSLATE_API_KEY` 僅能放在 Cloudflare Worker（secrets 或 vars）。
-> - OpenAI API Key 改為每位使用者自行輸入，僅存在使用者瀏覽器 localStorage。
-
-## 部署說明
-
-- 前端部署：GitHub Pages（保留現有 workflow）
-- 後端部署：Cloudflare Worker
-- `vite.config.js` 已設定 base path
-
-## 本機開發
+## 本機
 
 ```bash
 npm install
 npm run dev
-```
-
-## 建置
-
-```bash
 npm run build
-npm run preview
 ```
