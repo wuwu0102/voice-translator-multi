@@ -1,0 +1,7 @@
+name = "voice-translator-multi-api"
+main = "index.js"
+compatibility_date = "2026-05-16"
+
+[vars]
+GOOGLE_TRANSLATE_API_KEY = "your_google_translate_api_key"
+OPENAI_API_KEY = "your_openai_api_key"
