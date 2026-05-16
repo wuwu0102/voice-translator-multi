@@ -1,30 +1,38 @@
 import "./style.css";
-import { translateText } from "./translator";
+import { getTranslationServiceStatus, translateSegment } from "./translator";
 
 const languageModes = [
-  { id: "en", label: "英文模式", recognitionLang: "en-US", targetLang: "zh-TW", targetLabel: "中文" },
-  { id: "es-mx", label: "西文模式（墨西哥）", recognitionLang: "es-MX", targetLang: "zh-TW", targetLabel: "中文" },
-  { id: "es-es", label: "西文模式（西班牙）", recognitionLang: "es-ES", targetLang: "zh-TW", targetLabel: "中文" },
-  { id: "de", label: "德文模式", recognitionLang: "de-DE", targetLang: "zh-TW", targetLabel: "中文" },
-  { id: "ru", label: "俄文模式", recognitionLang: "ru-RU", targetLang: "zh-TW", targetLabel: "中文" }
+  { id: "en", label: "英文模式", recognitionLang: "en-US", targetLang: "zh-TW", targetLabel: "中文", apiMode: "english" },
+  { id: "es-mx", label: "西文模式（墨西哥）", recognitionLang: "es-MX", targetLang: "zh-TW", targetLabel: "中文", apiMode: "spanish-mx" },
+  { id: "es-es", label: "西文模式（西班牙）", recognitionLang: "es-ES", targetLang: "zh-TW", targetLabel: "中文", apiMode: "spanish-es" },
+  { id: "de", label: "德文模式", recognitionLang: "de-DE", targetLang: "zh-TW", targetLabel: "中文", apiMode: "german" },
+  { id: "ru", label: "俄文模式", recognitionLang: "ru-RU", targetLang: "zh-TW", targetLabel: "中文", apiMode: "russian" }
 ];
 
+const PAUSE_MS = 1200;
+const MAX_SEGMENT_LENGTH = 120;
+const SEGMENT_PUNCTUATION = /[.!?。？！]/;
+
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+const serviceStatus = getTranslationServiceStatus();
 
 const state = {
   selectedModeId: languageModes[0].id,
   listening: false,
   meetingMode: false,
-  sourceText: "",
-  translatedText: "",
-  translationService: import.meta.env.VITE_GOOGLE_TRANSLATE_API_KEY ? "Google" : "Mock（未設定 API Key）"
+  translationService: serviceStatus.label,
+  segments: [],
+  currentBuffer: ""
 };
 
 let recognition;
+let pauseTimer;
+let lastFinalAt = 0;
 
 const app = document.querySelector("#app");
 app.innerHTML = `
-  <header class="top-bar"><span class="version-badge">v1</span></header>
+  <header class="top-bar"><span class="version-badge">v2</span></header>
   <button id="main-action" class="main-action">🎤 點我開始翻譯</button>
 
   <section class="panel">
@@ -45,16 +53,17 @@ app.innerHTML = `
       <li>翻譯服務：<span id="translation-service"></span></li>
       <li>翻譯目標語言：<span id="target-language"></span></li>
     </ul>
+    <p id="service-message" class="warning-text"></p>
   </section>
 
   <section class="result-grid">
     <article class="panel card">
       <h3>原文</h3>
-      <p id="source-text" class="hint">尚無內容</p>
+      <div id="source-segments" class="segment-list"><p class="hint">尚無內容</p></div>
     </article>
     <article class="panel card">
       <h3>翻譯結果</h3>
-      <p id="translated-text" class="hint">尚無內容</p>
+      <div id="translated-segments" class="segment-list"><p class="hint">尚無內容</p></div>
     </article>
   </section>
 `;
@@ -67,92 +76,137 @@ const clearBtn = document.querySelector("#clear-btn");
 const speechStatusEl = document.querySelector("#speech-status");
 const translationServiceEl = document.querySelector("#translation-service");
 const targetLanguageEl = document.querySelector("#target-language");
-const sourceTextEl = document.querySelector("#source-text");
-const translatedTextEl = document.querySelector("#translated-text");
+const sourceSegmentsEl = document.querySelector("#source-segments");
+const translatedSegmentsEl = document.querySelector("#translated-segments");
+const serviceMessageEl = document.querySelector("#service-message");
 
 function getSelectedMode() {
   return languageModes.find((mode) => mode.id === state.selectedModeId) ?? languageModes[0];
 }
 
-function renderModeButtons() {
+function renderModeButtons() { /* unchanged pattern */
   modeButtonsContainer.innerHTML = languageModes
-    .map(
-      (mode) =>
-        `<button class="mode-btn ${mode.id === state.selectedModeId ? "active" : ""}" data-mode-id="${mode.id}">${mode.label}</button>`
-    )
+    .map((mode) => `<button class="mode-btn ${mode.id === state.selectedModeId ? "active" : ""}" data-mode-id="${mode.id}">${mode.label}</button>`)
+    .join("");
+}
+
+function renderSegments() {
+  if (!state.segments.length) {
+    sourceSegmentsEl.innerHTML = '<p class="hint">尚無內容</p>';
+    translatedSegmentsEl.innerHTML = '<p class="hint">尚無內容</p>';
+    return;
+  }
+
+  sourceSegmentsEl.innerHTML = state.segments
+    .map((segment, index) => `<div class="segment-item"><span class="segment-index">#${index + 1}</span><p>${segment.sourceText}</p></div>`)
+    .join("");
+
+  translatedSegmentsEl.innerHTML = state.segments
+    .map((segment) => `
+      <div class="segment-item">
+        <p>${segment.translatedText}</p>
+        <small>GPT 修正：${segment.cleanedByGpt ? "成功" : "未使用"}</small><br>
+        <small>Google 翻譯：${segment.ok ? "成功" : "失敗"}</small>
+      </div>
+    `)
     .join("");
 }
 
 function render() {
   renderModeButtons();
   const selectedMode = getSelectedMode();
-
   mainActionBtn.textContent = state.listening ? "🛑 停止翻譯" : "🎤 點我開始翻譯";
   mainActionBtn.classList.toggle("listening", state.listening);
   speechStatusEl.textContent = state.listening ? "聆聽中" : "待機";
   meetingModeBtn.textContent = `🧠 會議模式：${state.meetingMode ? "開" : "關"}`;
   translationServiceEl.textContent = state.translationService;
   targetLanguageEl.textContent = selectedMode.targetLabel;
-
-  sourceTextEl.textContent = state.sourceText || "尚無內容";
-  translatedTextEl.textContent = state.translatedText || "尚無內容";
-  sourceTextEl.classList.toggle("hint", !state.sourceText);
-  translatedTextEl.classList.toggle("hint", !state.translatedText);
+  serviceMessageEl.textContent = serviceStatus.configured ? "" : "尚未設定翻譯 API，請先部署 Cloudflare Worker";
+  renderSegments();
 }
 
-async function handleRecognizedText(text) {
-  state.sourceText = text.trim();
+function shouldFlushSegment(text) {
+  return SEGMENT_PUNCTUATION.test(text) || text.length >= MAX_SEGMENT_LENGTH;
+}
+
+async function flushSegment(force = false) {
+  const text = state.currentBuffer.trim();
+  if (!text) return;
+  if (!force && !shouldFlushSegment(text)) return;
+
+  state.currentBuffer = "";
+  const selectedMode = getSelectedMode();
+  const result = await translateSegment(text, selectedMode);
+
+  state.segments.push({
+    sourceText: text,
+    translatedText: result.translatedText || "翻譯服務尚未設定或 API 發生錯誤",
+    cleanedByGpt: result.cleanedByGpt,
+    ok: result.ok
+  });
+
   render();
 
-  const selectedMode = getSelectedMode();
-  const translated = await translateText(state.sourceText, selectedMode.targetLang);
-  state.translatedText = translated || "（翻譯失敗）";
-  render();
+  if (!state.meetingMode) {
+    stopListening();
+  }
+}
+
+function resetPauseTimer() {
+  clearTimeout(pauseTimer);
+  pauseTimer = setTimeout(() => {
+    if (Date.now() - lastFinalAt >= PAUSE_MS) {
+      flushSegment(true);
+    }
+  }, PAUSE_MS + 20);
 }
 
 function stopListening() {
-  if (recognition && state.listening) {
-    recognition.stop();
-  }
+  clearTimeout(pauseTimer);
+  if (recognition && state.listening) recognition.stop();
   state.listening = false;
   render();
 }
 
 function startListening() {
   if (!SpeechRecognition) {
-    alert("此瀏覽器不支援 Web Speech API，請改用最新版 Chrome。 ");
+    alert("此瀏覽器不支援 Web Speech API，請改用最新版 Chrome。");
     return;
   }
 
   const selectedMode = getSelectedMode();
-
   recognition = new SpeechRecognition();
   recognition.lang = selectedMode.recognitionLang;
-  recognition.interimResults = false;
-  recognition.continuous = state.meetingMode;
+  recognition.interimResults = true;
+  recognition.continuous = true;
 
   recognition.onstart = () => {
     state.listening = true;
     render();
   };
 
-  recognition.onresult = async (event) => {
-    const resultText = Array.from(event.results)
-      .map((result) => result[0].transcript)
-      .join(" ")
-      .trim();
+  recognition.onresult = (event) => {
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      const result = event.results[i];
+      if (!result.isFinal) continue;
 
-    if (resultText) {
-      await handleRecognizedText(resultText);
-    }
+      const finalText = result[0].transcript.trim();
+      if (!finalText) continue;
 
-    if (!state.meetingMode) {
-      stopListening();
+      state.currentBuffer = `${state.currentBuffer} ${finalText}`.trim();
+      lastFinalAt = Date.now();
+      resetPauseTimer();
+      flushSegment(false);
     }
   };
 
   recognition.onend = () => {
     state.listening = false;
+    if (state.meetingMode) {
+      startListening();
+      return;
+    }
+    flushSegment(true);
     render();
   };
 
@@ -165,43 +219,30 @@ function startListening() {
   recognition.start();
 }
 
-mainActionBtn.addEventListener("click", () => {
-  if (state.listening) {
-    stopListening();
-  } else {
-    startListening();
-  }
-});
-
+mainActionBtn.addEventListener("click", () => (state.listening ? stopListening() : startListening()));
 modeButtonsContainer.addEventListener("click", (event) => {
   const target = event.target;
   if (!(target instanceof HTMLButtonElement)) return;
-
   const modeId = target.dataset.modeId;
   if (!modeId || modeId === state.selectedModeId) return;
-
   state.selectedModeId = modeId;
   stopListening();
   render();
 });
-
 meetingModeBtn.addEventListener("click", () => {
   state.meetingMode = !state.meetingMode;
   if (state.listening) {
     stopListening();
     startListening();
-  } else {
-    render();
   }
+  render();
 });
-
 settingsBtn.addEventListener("click", () => {
-  alert("目前設定：翻譯服務會在有 API Key 時使用 Google，否則使用 Mock。\n可於 .env 設定 VITE_GOOGLE_TRANSLATE_API_KEY。");
+  alert("翻譯服務架構：Web Speech API 分段 -> GPT 修正 -> Google Translate（透過 Cloudflare Worker）");
 });
-
 clearBtn.addEventListener("click", () => {
-  state.sourceText = "";
-  state.translatedText = "";
+  state.segments = [];
+  state.currentBuffer = "";
   render();
 });
 

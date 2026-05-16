@@ -1,54 +1,72 @@
-const GOOGLE_TRANSLATE_API_URL = "https://translation.googleapis.com/language/translate/v2";
+const API_BASE = import.meta.env.VITE_TRANSLATE_API_BASE?.trim();
 
-export async function mockTranslate(text, targetLang = "zh-TW") {
-  await new Promise((resolve) => setTimeout(resolve, 240));
-  return `【Mock 翻譯 -> ${targetLang}】${text}`;
+export function getTranslationServiceStatus() {
+  return {
+    configured: Boolean(API_BASE),
+    label: API_BASE ? "Google Translate + GPT 修正" : "尚未設定"
+  };
 }
 
-export async function googleTranslate(text, targetLang = "zh-TW") {
-  const apiKey = import.meta.env.VITE_GOOGLE_TRANSLATE_API_KEY;
-
-  if (!apiKey) {
-    throw new Error("Missing Google Translate API key.");
+export async function translateSegment(text, modeConfig) {
+  const trimmed = text?.trim();
+  if (!trimmed) {
+    return {
+      ok: false,
+      sourceText: "",
+      cleanedText: "",
+      translatedText: "",
+      cleanedByGpt: false,
+      error: "翻譯服務尚未設定或 API 發生錯誤"
+    };
   }
 
-  const response = await fetch(
-    `${GOOGLE_TRANSLATE_API_URL}?key=${encodeURIComponent(apiKey)}`,
-    {
+  if (!API_BASE) {
+    return {
+      ok: false,
+      sourceText: trimmed,
+      cleanedText: trimmed,
+      translatedText: "翻譯服務尚未設定或 API 發生錯誤",
+      cleanedByGpt: false,
+      error: "尚未設定翻譯 API，請先部署 Cloudflare Worker"
+    };
+  }
+
+  try {
+    const response = await fetch(`${API_BASE}/api/translate`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
       body: JSON.stringify({
-        q: text,
-        target: targetLang,
-        format: "text"
+        text: trimmed,
+        sourceLang: modeConfig.recognitionLang,
+        targetLang: modeConfig.targetLang,
+        mode: modeConfig.apiMode
       })
+    });
+
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.ok) {
+      throw new Error(data?.error || `HTTP ${response.status}`);
     }
-  );
 
-  if (!response.ok) {
-    throw new Error(`Google Translate API error: ${response.status}`);
-  }
-
-  const data = await response.json();
-  return data?.data?.translations?.[0]?.translatedText ?? "";
-}
-
-export async function translateText(text, targetLang = "zh-TW") {
-  const trimmed = text?.trim();
-  if (!trimmed) return "";
-
-  const hasApiKey = Boolean(import.meta.env.VITE_GOOGLE_TRANSLATE_API_KEY);
-
-  if (!hasApiKey) {
-    return mockTranslate(trimmed, targetLang);
-  }
-
-  try {
-    return await googleTranslate(trimmed, targetLang);
+    return {
+      ok: true,
+      sourceText: data.sourceText ?? trimmed,
+      cleanedText: data.cleanedText ?? trimmed,
+      translatedText: data.translatedText ?? "",
+      cleanedByGpt: data.cleanedByGpt !== false,
+      error: ""
+    };
   } catch (error) {
-    console.warn("Google Translate failed, fallback to mockTranslate:", error);
-    return mockTranslate(trimmed, targetLang);
+    console.error("translateSegment failed:", error);
+    return {
+      ok: false,
+      sourceText: trimmed,
+      cleanedText: trimmed,
+      translatedText: "翻譯服務尚未設定或 API 發生錯誤",
+      cleanedByGpt: false,
+      error: "翻譯服務尚未設定或 API 發生錯誤"
+    };
   }
 }
