@@ -24,32 +24,19 @@ export function getTranslationServiceStatus() {
   return {
     configured: Boolean(API_BASE),
     hasOpenAiKey,
-    label: hasOpenAiKey
-      ? "Google Translate + 使用者 GPT Key"
-      : "Google Translate（未啟用 GPT 修正）"
+    label: hasOpenAiKey ? "Google Translate + 使用者 GPT Key" : "Google Translate（未啟用 GPT 修正）"
   };
 }
 
-export async function translateSegment(text, modeConfig) {
-  const trimmed = text?.trim();
+export async function translateSegment(payload, modeConfig) {
+  const trimmed = payload?.text?.trim();
   if (!trimmed) {
-    return {
-      ok: false,
-      sourceText: "",
-      cleanedText: "",
-      translatedText: "",
-      cleanedByGpt: false,
-      gptError: "",
-      error: "翻譯服務尚未設定或 API 發生錯誤"
-    };
+    return { ok: false, translatedText: "", cleanedByGpt: false, gptError: "", error: "空白段落" };
   }
-
   if (!API_BASE) {
     return {
       ok: false,
-      sourceText: trimmed,
-      cleanedText: trimmed,
-      translatedText: "翻譯服務尚未設定或 API 發生錯誤",
+      translatedText: "",
       cleanedByGpt: false,
       gptError: "",
       error: "尚未設定翻譯 API，請先部署 Cloudflare Worker"
@@ -59,19 +46,16 @@ export async function translateSegment(text, modeConfig) {
   const openAiApiKey = getStoredOpenAiApiKey();
 
   try {
-    const headers = {
-      "Content-Type": "application/json"
-    };
-
-    if (openAiApiKey) {
-      headers["X-OpenAI-API-Key"] = openAiApiKey;
-    }
+    const headers = { "Content-Type": "application/json" };
+    if (openAiApiKey) headers["X-OpenAI-API-Key"] = openAiApiKey;
 
     const response = await fetch(`${API_BASE}/api/translate`, {
       method: "POST",
       headers,
       body: JSON.stringify({
         text: trimmed,
+        protectedText: payload.protectedText,
+        glossaryMap: payload.glossaryMap,
         sourceLang: modeConfig.recognitionLang,
         targetLang: modeConfig.targetLang,
         mode: modeConfig.apiMode
@@ -85,7 +69,6 @@ export async function translateSegment(text, modeConfig) {
 
     return {
       ok: true,
-      sourceText: data.sourceText ?? trimmed,
       cleanedText: data.cleanedText ?? trimmed,
       translatedText: data.translatedText ?? "",
       cleanedByGpt: data.cleanedByGpt === true,
@@ -96,12 +79,11 @@ export async function translateSegment(text, modeConfig) {
     console.error("translateSegment failed:", error);
     return {
       ok: false,
-      sourceText: trimmed,
-      cleanedText: trimmed,
-      translatedText: "翻譯服務尚未設定或 API 發生錯誤",
+      cleanedText: payload.protectedText || trimmed,
+      translatedText: "Google 翻譯失敗",
       cleanedByGpt: false,
       gptError: "",
-      error: "翻譯服務尚未設定或 API 發生錯誤"
+      error: String(error?.message || error)
     };
   }
 }
